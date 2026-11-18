@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="number of indices to process (default: all)",
     )
+    parser.add_argument(
+        "--scenario",
+        choices=[p.name for p in PROBLEMS],
+        action="append",
+        help="run only this scenario (repeatable; default: all)",
+    )
     args = parser.parse_args()
     if args.prefetch < 1:
         parser.error("--prefetch must be at least 1")
@@ -51,6 +57,8 @@ def main() -> None:
     print("-" * len(header))
 
     for base in PROBLEMS:
+        if args.scenario and base.name not in args.scenario:
+            continue
         items = args.indices or len(base.indices)
         baseline = 0.0
         for name, run in solutions.items():

@@ -6,7 +6,8 @@ pipeline for data that lives in slow external storage.
 The async side mirrors the shape of `torch.utils.data.DatasetFolder` + `DataLoader`: an indexed
 dataset whose `__getitem__` performs the actual load, consumed either directly or through a
 prefetching async stream. Nothing here touches a real disk — storage latency is simulated, which
-makes the two scenarios (I/O-bound and CPU-bound) reproducible and fast to reason about.
+makes the three scenarios (I/O-bound, CPU-bound and balanced) reproducible and fast to reason
+about.
 
 ## What it shows
 
@@ -15,8 +16,8 @@ makes the two scenarios (I/O-bound and CPU-bound) reproducible and fast to reaso
 - **CPU-bound** work: async streaming gains nothing, because synchronous processing blocks the event
   loop — the same reason `asyncio` cannot parallelize CPU work.
 - **Overlapping stages** (`pipeline_sol`): running processing in a worker thread so it no longer
-  blocks writes lifts throughput to `max(read, process, write)` instead of the sum — worth a lot
-  when two or more stages are comparably expensive, worth little when one stage dominates.
+  blocks writes lifts throughput to `max(read, process, write)` instead of the sum — worth ~3x over
+  sync in the `balanced` scenario, and almost nothing when a single stage dominates.
 - Prefetch depth behaves like `DataLoader(prefetch_factor=...)`: throughput rises until the pipeline
   is limited by its slowest stage, then stops improving.
 
@@ -27,7 +28,7 @@ setup/
   storage.py   ExternalStorage: read_at / write_at (blocking) and
                read_at_async / write_at_async (awaitable), with simulated latencies
   problem.py   Problem object (read/process/write costs + indices), plus the
-               IO_BOUND and CPU_BOUND scenarios
+               IO_BOUND, CPU_BOUND and BALANCED scenarios
   dataset.py   StorageDataset: DatasetFolder-shaped __len__ / __getitem__ / __iter__,
                and astream(prefetch=...) for ordered read-ahead
 solution/
@@ -46,6 +47,7 @@ uv run python run.py                        # 100 indices, prefetch 2
 uv run python run.py --indices 20           # shorter run
 uv run python run.py --prefetch 8           # deeper read-ahead
 uv run python run.py --indices 500 --prefetch 4
+uv run python run.py --scenario balanced     # one scenario (repeatable)
 ```
 
 ### Output
@@ -60,8 +62,12 @@ io-bound     100 async       3.24s     32.4ms     1.30x
 io-bound     100 pipeline    3.10s     31.0ms     1.36x
 
 cpu-bound    100 sync        5.66s     56.6ms     1.00x
-cpu-bound    100 async       5.55s     55.5ms     1.02x
-cpu-bound    100 pipeline    5.48s     54.8ms     1.03x
+cpu-bound    100 async       5.59s     55.9ms     1.01x
+cpu-bound    100 pipeline    5.46s     54.6ms     1.04x
+
+balanced     100 sync        7.13s     71.3ms     1.00x
+balanced     100 async       4.60s     46.0ms     1.55x
+balanced     100 pipeline    2.40s     24.0ms     2.97x
 ```
 
 Latencies are drawn from per-stage seeded RNGs, and `run.py` builds a fresh `Problem` for every
@@ -103,16 +109,18 @@ reader (await read) -> processor (asyncio.to_thread(process)) -> writer (await w
 ```
 
 Processing runs in a thread, so the writer drains earlier samples while the next one is being
-transformed. With `io-bound` the write stage dominates and the gain over `async_sol` is small; the
-effect is clear when the stages are comparable (30 samples, 15–25 ms per stage):
+transformed. With `io-bound` the write stage dominates and the gain over `async_sol` is small; with
+`cpu-bound` processing dominates, so the same is true. The regime that shows the pipeline is
+`balanced`, where read, process and write all cost ~20 ms:
 
 | solution | per item |
 | -------- | -------- |
-| sync     | 70.8 ms  |
-| async    | 47.0 ms  |
-| pipeline | 25.3 ms  |
+| sync     | 71.3 ms  |
+| async    | 46.0 ms  |
+| pipeline | 24.0 ms  |
 
-That is `sum(stages)` → `max(stages)`.
+That is `sum(stages)` → `max(stages)`: about 3x over sync and 2x over async. The gain shrinks as
+one stage starts to dominate — which is exactly what `io-bound` and `cpu-bound` demonstrate.
 
 ## Caveats
 

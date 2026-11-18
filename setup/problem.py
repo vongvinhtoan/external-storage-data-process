@@ -1,10 +1,12 @@
 """The workloads the solutions are measured against.
 
 A `Problem` bundles the three costs of the pipeline (read, process, write) plus
-the data indices to work through. Two scenarios are provided:
+the data indices to work through. Three scenarios are provided:
 
 * `IO_BOUND`  - storage latency dominates, the transform is cheap.
 * `CPU_BOUND` - the transform dominates, storage latency is negligible.
+* `BALANCED`  - read, process and write are all comparable, which is where
+  overlapping every stage pays off.
 """
 
 import random
@@ -98,4 +100,13 @@ CPU_BOUND = Problem(
     process_latency=(0.020, 0.080),
 )
 
-PROBLEMS = (IO_BOUND, CPU_BOUND)
+# All three stages comparable (~20 ms each): the regime where overlapping
+# every stage matters, since sum(stages) is roughly 3x max(stage).
+BALANCED = Problem(
+    name="balanced",
+    read_latency=(0.015, 0.025),
+    write_latency=(0.015, 0.025),
+    process_latency=(0.015, 0.025),
+)
+
+PROBLEMS = (IO_BOUND, CPU_BOUND, BALANCED)
