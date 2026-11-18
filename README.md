@@ -60,22 +60,22 @@ $ uv run python run.py
 prefetch=2
 scenario   items solution    total   per item   vs sync
 -------------------------------------------------------
-io-bound     100 sync        3.77s     37.7ms     1.00x
-io-bound     100 async       2.87s     28.7ms     1.31x
-io-bound     100 pipeline    3.16s     31.6ms     1.19x
+io-bound     100 sync        4.22s     42.2ms     1.00x
+io-bound     100 async       3.24s     32.4ms     1.30x
+io-bound     100 pipeline    3.10s     31.0ms     1.36x
 
-cpu-bound    100 sync        5.21s     52.1ms     1.00x
-cpu-bound    100 async       5.51s     56.1ms     0.95x
-cpu-bound    100 pipeline    5.51s     55.1ms     0.95x
+cpu-bound    100 sync        5.66s     56.6ms     1.00x
+cpu-bound    100 async       5.55s     55.5ms     1.02x
+cpu-bound    100 pipeline    5.48s     54.8ms     1.03x
 
-skewed       100 sync        4.76s     47.6ms     1.00x
-skewed       100 async       3.97s     39.7ms     1.20x
-skewed       100 pipeline    4.50s     45.0ms     1.06x
+skewed       100 sync        5.16s     51.6ms     1.00x
+skewed       100 async       4.10s     41.0ms     1.26x
+skewed       100 pipeline    3.93s     39.3ms     1.31x
 ```
 
-Numbers move between runs because every read, write and processing step draws a fresh random
-latency from its configured range; at 100 items the run-to-run spread is a few percent, and the
-async variants land within roughly ±5% of each other unless one stage dominates.
+Latencies are drawn from per-stage seeded RNGs, and `run.py` builds a fresh `Problem` for every
+solution, so all solutions face an identical sequence of read/process/write costs. The comparison is
+therefore purely structural; only wall-clock jitter (a few percent) moves between runs.
 
 ## The model
 
@@ -96,8 +96,9 @@ The `skewed` scenario keeps the io-bound ranges but samples them from a log-norm
 | process | 1.1 ms | 1.4 ms| 3.7 ms | 6.0 ms  |
 | write   | 27.6 ms| 36.4 ms| 94.2 ms| 156.9 ms|
 
-The tail is the point: ~1% of writes take more than 5× the median, so a run is a mix of mostly
-cheap operations and occasional stalls that async read-ahead can absorb.
+The tail is the point: ~1% of writes take more than 5× the median, so a run is a mix of mostly cheap
+operations and occasional stalls. Where those stalls land decides whether they can be hidden — here
+they are in the writes, which are serial, so they cannot (see below).
 
 The sync solution is a plain `for` over the dataset. The async solution consumes
 `dataset.astream(prefetch=n)`, which keeps up to `n` loads in flight while the consumer processes
@@ -105,11 +106,15 @@ and writes — the queue is FIFO, so sample order is preserved and memory stays 
 
 Throughput therefore approaches `max(read, process, write)` rather than their sum:
 
-| prefetch | io-bound per item |
-| -------- | ----------------- |
-| 1        | 38.4 ms (no read-ahead, same as sync) |
-| 2        | 32.6 ms |
-| 4        | 29.8 ms (asymptote ≈ 28.6 ms) |
+| prefetch | sync  | async | pipeline |
+| -------- | ----- | ----- | -------- |
+| 1        | 42.0 ms | 39.6 ms | 31.0 ms |
+| 2        | 42.2 ms | 32.4 ms | 31.0 ms |
+| 4        | 41.9 ms | 32.4 ms | 31.1 ms |
+| 8        | 41.7 ms | 32.5 ms | 30.9 ms |
+
+Read-ahead pays once (prefetch 1 → 2); beyond that the write stage sets the floor (~27.5 ms + a
+little overhead), so a deeper queue has nothing left to hide.
 
 ### Overlapping process and write
 
@@ -131,12 +136,33 @@ effect is clear when the stages are comparable (30 samples, 15–25 ms per stage
 
 That is `sum(stages)` → `max(stages)`.
 
+### A heavy tail does not bend the floor
+
+`skewed` moves the tail into the writes (p99 ≈ 157 ms). Deeper prefetch cannot absorb a slow write,
+because the writer is a single ordered stage: every write must finish before the next starts, so the
+run is bounded below by the sum of write latencies (~36.4 ms/item here).
+
+| prefetch | sync  | async | pipeline |
+| -------- | ----- | ----- | -------- |
+| 1        | 50.3 ms | 47.8 ms | 37.9 ms |
+| 2        | 50.6 ms | 39.9 ms | 37.9 ms |
+| 4        | 50.3 ms | 39.7 ms | 37.9 ms |
+| 8        | 50.6 ms | 39.7 ms | 37.9 ms |
+| 16       | 50.5 ms | 39.8 ms | 37.9 ms |
+
+The pipeline sits on the write floor from the first sample and stays there (it overlaps reads and
+processing, not writes); `async_sol` needs prefetch ≥ 2 to reach its own plateau. Going from 2 to 16
+changes nothing — the tail is on the critical path, not in the queue. Absorbing it would require
+concurrent writes, which trades ordering guarantees for throughput.
+
 ## Caveats
 
 - `time.sleep` overshoots its target slightly more than `asyncio.sleep`, so the sync solution pays a
-  small constant penalty per storage call. That is why the io-bound ratio sits around 1.2–1.4×
-  rather than exactly at the stage-bound limit.
+  small constant penalty per storage call (~0.3 ms at 1 ms, ~3 ms at 30 ms). That, plus per-stage
+  queue and thread overhead, is why measured ratios sit a little below the ideal stage bound.
+- Wall-clock numbers still wobble by a few percent between runs even though the latency draws are
+  seeded — scheduling, not sampling, is the remaining source of variation.
 - CPU work is simulated with `time.sleep`, which releases the GIL; the async solution deliberately
   keeps processing synchronous, so no hidden parallelism is introduced.
-- `--indices N` has no upper bound, but runtime grows linearly (~37 ms/item io-bound, ~55 ms/item
-  cpu-bound per solution).
+- `--indices N` has no upper bound, but runtime grows linearly (~42 ms/item sync io-bound,
+  ~57 ms/item sync cpu-bound; the async variants are ~25–35% faster on io-bound).

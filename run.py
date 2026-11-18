@@ -59,9 +59,12 @@ def main() -> None:
     for base in PROBLEMS:
         if args.scenario and base.name not in args.scenario:
             continue
-        problem = base.with_length(args.indices) if args.indices else base
+        items = args.indices or len(base.indices)
         baseline = 0.0
         for name, run in solutions.items():
+            # A fresh instance per run: identical latency draws for every
+            # solution, so the comparison is purely structural.
+            problem = base.with_length(items)
             elapsed = run(problem)
             per_item = elapsed / len(problem.indices) * 1e3
             if name == "sync":

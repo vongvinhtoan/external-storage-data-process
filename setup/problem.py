@@ -28,28 +28,46 @@ class Problem:
     process_latency: LatencyRange
     indices: tuple[int, ...] = field(default_factory=lambda: tuple(range(100)))
     skew: float = 0.0  # 0 -> uniform; > 0 -> log-normal with this sigma
+    seed: int = 0
+    _rngs: dict[str, random.Random] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        # One RNG per stage, so each stage draws the same sequence of latencies
+        # regardless of how the stages interleave. Makes runs comparable across
+        # prefetch depths and across solutions.
+        object.__setattr__(
+            self,
+            "_rngs",
+            {
+                stage: random.Random(self.seed + offset)
+                for offset, stage in enumerate(("read", "process", "write"))
+            },
+        )
 
     def with_length(self, n: int) -> "Problem":
         """A copy of this problem with `n` indices."""
         return replace(self, indices=tuple(range(n)))
 
-    def _latency(self, bounds: LatencyRange) -> float:
+    def _latency(self, stage: str, bounds: LatencyRange) -> float:
+        rng = self._rngs[stage]
         if self.skew <= 0:
-            return random.uniform(*bounds)
+            return rng.uniform(*bounds)
 
         # Log-normal around the range's midpoint: most calls land near the
         # median, a minority take much longer, and the mean exceeds the median.
         low, high = bounds
-        return random.lognormvariate(math.log((low + high) / 2), self.skew)
+        return rng.lognormvariate(math.log((low + high) / 2), self.skew)
 
     def read_delay(self, i: int) -> float:
-        return self._latency(self.read_latency)
+        return self._latency("read", self.read_latency)
 
     def write_delay(self, i: int) -> float:
-        return self._latency(self.write_latency)
+        return self._latency("write", self.write_latency)
 
     def process_delay(self) -> float:
-        return self._latency(self.process_latency)
+        return self._latency("process", self.process_latency)
 
     def process(self, data: Iterable[int]) -> list[int]:
         """CPU-only transform: a plain loop over the data that was read.
