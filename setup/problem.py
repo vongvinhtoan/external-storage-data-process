@@ -1,12 +1,15 @@
 """The workloads the solutions are measured against.
 
 A `Problem` bundles the three costs of the pipeline (read, process, write) plus
-the data indices to work through. Two scenarios are provided:
+the data indices to work through. Three scenarios are provided:
 
 * `IO_BOUND`  - storage latency dominates, the transform is cheap.
 * `CPU_BOUND` - the transform dominates, storage latency is negligible.
+* `SKEWED`    - storage latency is heavy-tailed: mostly fast, occasionally much
+  slower, the way a real disk or object store behaves.
 """
 
+import math
 import random
 import time
 from collections.abc import Iterable
@@ -24,19 +27,29 @@ class Problem:
     write_latency: LatencyRange
     process_latency: LatencyRange
     indices: tuple[int, ...] = field(default_factory=lambda: tuple(range(100)))
+    skew: float = 0.0  # 0 -> uniform; > 0 -> log-normal with this sigma
 
     def with_length(self, n: int) -> "Problem":
         """A copy of this problem with `n` indices."""
         return replace(self, indices=tuple(range(n)))
 
+    def _latency(self, bounds: LatencyRange) -> float:
+        if self.skew <= 0:
+            return random.uniform(*bounds)
+
+        # Log-normal around the range's midpoint: most calls land near the
+        # median, a minority take much longer, and the mean exceeds the median.
+        low, high = bounds
+        return random.lognormvariate(math.log((low + high) / 2), self.skew)
+
     def read_delay(self, i: int) -> float:
-        return random.uniform(*self.read_latency)
+        return self._latency(self.read_latency)
 
     def write_delay(self, i: int) -> float:
-        return random.uniform(*self.write_latency)
+        return self._latency(self.write_latency)
 
     def process_delay(self) -> float:
-        return random.uniform(*self.process_latency)
+        return self._latency(self.process_latency)
 
     def process(self, data: Iterable[int]) -> list[int]:
         """CPU-only transform: a plain loop over the data that was read.
@@ -78,4 +91,14 @@ CPU_BOUND = Problem(
     process_latency=(0.020, 0.080),
 )
 
-PROBLEMS = (IO_BOUND, CPU_BOUND)
+# Heavy-tailed storage: same scale as io-bound, but latency is log-normal, so a
+# few percent of calls are several times slower than the median.
+SKEWED = Problem(
+    name="skewed",
+    read_latency=(0.001, 0.010),
+    write_latency=(0.005, 0.050),
+    process_latency=(0.0002, 0.002),
+    skew=0.75,
+)
+
+PROBLEMS = (IO_BOUND, CPU_BOUND, SKEWED)
