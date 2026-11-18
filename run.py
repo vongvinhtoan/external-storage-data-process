@@ -9,7 +9,7 @@ Usage:
 import argparse
 from functools import partial
 
-from solution import async_sol, sync_sol
+from solution import async_sol, pipeline_sol, sync_sol
 from setup.problem import PROBLEMS
 
 
@@ -42,6 +42,7 @@ def main() -> None:
     solutions = {
         "sync": sync_sol.run,
         "async": partial(async_sol.run, prefetch=args.prefetch),
+        "pipeline": partial(pipeline_sol.run, prefetch=args.prefetch),
     }
 
     header = f"{'scenario':<10} {'items':>5} {'solution':<8} {'total':>8} {'per item':>10} {'vs sync':>9}"

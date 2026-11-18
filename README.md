@@ -14,6 +14,9 @@ makes the two scenarios (I/O-bound and CPU-bound) reproducible and fast to reaso
   and writes.
 - **CPU-bound** work: async streaming gains nothing, because synchronous processing blocks the event
   loop — the same reason `asyncio` cannot parallelize CPU work.
+- **Overlapping stages** (`pipeline_sol`): running processing in a worker thread so it no longer
+  blocks writes lifts throughput to `max(read, process, write)` instead of the sum — worth a lot
+  when two or more stages are comparably expensive, worth little when one stage dominates.
 - Prefetch depth behaves like `DataLoader(prefetch_factor=...)`: throughput rises until the pipeline
   is limited by its slowest stage, then stops improving.
 
@@ -28,9 +31,10 @@ setup/
   dataset.py   StorageDataset: DatasetFolder-shaped __len__ / __getitem__ / __iter__,
                and astream(prefetch=...) for ordered read-ahead
 solution/
-  sync_sol.py   run(problem)                -> elapsed seconds
-  async_sol.py  run(problem, prefetch=2)    -> elapsed seconds
-run.py         runs every solution against every scenario
+  sync_sol.py     run(problem)                -> elapsed seconds
+  async_sol.py    run(problem, prefetch=2)    -> elapsed seconds
+  pipeline_sol.py three-stage read/process/write pipeline, bounded queues
+run.py           runs every solution against every scenario
 ```
 
 ## Usage
@@ -51,11 +55,13 @@ $ uv run python run.py
 prefetch=2
 scenario   items solution    total   per item   vs sync
 -------------------------------------------------------
-io-bound     100 sync        4.10s     41.0ms     1.00x
-io-bound     100 async       2.98s     29.8ms     1.38x
+io-bound     100 sync        3.93s     39.3ms     1.00x
+io-bound     100 async       2.91s     29.1ms     1.35x
+io-bound     100 pipeline    2.91s     29.1ms     1.35x
 
-cpu-bound    100 sync        5.54s     55.4ms     1.00x
-cpu-bound    100 async       5.48s     54.8ms     1.01x
+cpu-bound    100 sync        5.25s     52.5ms     1.00x
+cpu-bound    100 async       5.31s     53.1ms     0.99x
+cpu-bound    100 pipeline    5.21s     52.1ms     1.01x
 ```
 
 Numbers move between runs because every read, write and processing step draws a fresh random
@@ -82,6 +88,26 @@ Throughput therefore approaches `max(read, process, write)` rather than their su
 | 1        | 38.4 ms (no read-ahead, same as sync) |
 | 2        | 32.6 ms |
 | 4        | 29.8 ms (asymptote ≈ 28.6 ms) |
+
+### Overlapping process and write
+
+`pipeline_sol` splits the work into three coroutines connected by bounded queues:
+
+```
+reader (await read) -> processor (asyncio.to_thread(process)) -> writer (await write)
+```
+
+Processing runs in a thread, so the writer drains earlier samples while the next one is being
+transformed. With `io-bound` the write stage dominates and the gain over `async_sol` is small; the
+effect is clear when the stages are comparable (30 samples, 15–25 ms per stage):
+
+| solution | per item |
+| -------- | -------- |
+| sync     | 72.2 ms  |
+| async    | 44.7 ms  |
+| pipeline | 24.7 ms  |
+
+That is `sum(stages)` → `max(stages)`.
 
 ## Caveats
 
